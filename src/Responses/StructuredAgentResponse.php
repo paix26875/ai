@@ -14,6 +14,16 @@ class StructuredAgentResponse extends AgentResponse implements Arrayable, ArrayA
 {
     use ProvidesStructuredResponse;
 
+    /**
+     * Schema constraint violations that remained after the configured retries.
+     *
+     * Empty when the output satisfied the schema, or when "ai.structured_output.on_failure"
+     * is set to "throw" (in which case a StructuredOutputValidationException is raised instead).
+     *
+     * @var list<string>
+     */
+    public array $validationErrors = [];
+
     public function __construct(string $invocationId, array $structured, string $text, Usage $usage, Meta $meta)
     {
         parent::__construct($invocationId, $text, $usage, $meta);
@@ -21,6 +31,18 @@ class StructuredAgentResponse extends AgentResponse implements Arrayable, ArrayA
         $this->structured = $structured;
         $this->toolCalls = new Collection;
         $this->toolResults = new Collection;
+    }
+
+    /**
+     * Attach the schema validation errors that remained after retries.
+     *
+     * @param  list<string>  $errors
+     */
+    public function withValidationErrors(array $errors): self
+    {
+        $this->validationErrors = $errors;
+
+        return $this;
     }
 
     /**

@@ -6,9 +6,26 @@ use Illuminate\Support\Arr;
 use Laravel\Ai\Gateway\TextGenerationOptions;
 use Laravel\Ai\ObjectSchema;
 use Laravel\Ai\Providers\Provider;
+use Laravel\Ai\Schema\StructuredOutputNormalizer;
 
 trait BuildsTextRequests
 {
+    /**
+     * JSON Schema validation keywords Anthropic's native structured output rejects.
+     *
+     * output_config.format compiles the schema against a strict JSON Schema subset and
+     * returns a 400 when it encounters these. They are stripped from the outgoing schema;
+     * the constraints can still be validated client side after the response is parsed.
+     *
+     * @var list<string>
+     */
+    private const UNSUPPORTED_SCHEMA_KEYWORDS = [
+        'minimum', 'maximum', 'exclusiveMinimum', 'exclusiveMaximum', 'multipleOf',
+        'minLength', 'maxLength',
+        'minItems', 'maxItems', 'uniqueItems', 'minContains', 'maxContains',
+        'minProperties', 'maxProperties',
+    ];
+
     /**
      * Build the request body for the Anthropic Messages API.
      */
@@ -39,7 +56,10 @@ trait BuildsTextRequests
             $body['output_config'] = [
                 'format' => [
                     'type' => 'json_schema',
-                    'schema' => (new ObjectSchema($schema))->toSchema(),
+                    'schema' => StructuredOutputNormalizer::strip(
+                        (new ObjectSchema($schema))->toSchema(),
+                        self::UNSUPPORTED_SCHEMA_KEYWORDS,
+                    ),
                 ],
             ];
 
