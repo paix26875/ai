@@ -3,6 +3,7 @@
 use Illuminate\Support\Facades\Http;
 use Tests\Fixtures\Agents\AssistantAgent;
 use Tests\Fixtures\Agents\AttributeAgent;
+use Tests\Fixtures\Agents\ConstrainedStructuredAgent;
 use Tests\Fixtures\Agents\StructuredAgent;
 use Tests\Fixtures\Agents\StructuredWithThinkingAgent;
 use Tests\Fixtures\Agents\ToolUsingAgent;
@@ -239,6 +240,48 @@ describe('structured output', function () {
             provider: 'anthropic',
         );
         expect($response->structured)->toMatchArray(['name' => 'Taylor', 'age' => 30]);
+    });
+
+    test('native output_config strips unsupported schema keywords', function () {
+        config(['ai.providers.anthropic' => [
+            ...config('ai.providers.anthropic'),
+            'key' => 'test-key',
+            'anthropic_beta' => 'structured-outputs',
+        ]]);
+
+        Http::fake([
+            'api.anthropic.com/*' => $this->fakeStructuredResponse(['score' => 8, 'summary' => 'Good', 'tags' => ['php']]),
+        ]);
+
+        (new ConstrainedStructuredAgent)->prompt(
+            'Review this code',
+            provider: 'anthropic',
+        );
+
+        Http::assertSent(function ($request) {
+            $schema = $request->data()['output_config']['format']['schema'] ?? null;
+
+            if ($schema === null) {
+                return false;
+            }
+
+            $properties = $schema['properties'];
+
+            return
+                // The unsupported constraint keywords are removed from every node...
+                ! array_key_exists('minimum', $properties['score'])
+                && ! array_key_exists('maximum', $properties['score'])
+                && ! array_key_exists('minLength', $properties['summary'])
+                && ! array_key_exists('maxLength', $properties['summary'])
+                && ! array_key_exists('minItems', $properties['tags'])
+                && ! array_key_exists('maxItems', $properties['tags'])
+                // ...but they are preserved as natural-language notes in the description...
+                && $properties['score']['description'] === 'Constraints: minimum 1, maximum 10.'
+                // ...and the properties / required list are otherwise intact.
+                && array_keys($properties) === ['score', 'summary', 'tags']
+                && $properties['score']['type'] === 'integer'
+                && $schema['required'] === ['score', 'summary', 'tags'];
+        });
     });
 });
 
