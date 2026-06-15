@@ -4,6 +4,7 @@ namespace Laravel\Ai\Providers\Concerns;
 
 use Closure;
 use Illuminate\JsonSchema\JsonSchemaTypeFactory;
+use Illuminate\JsonSchema\Types\Type;
 use Illuminate\Support\Str;
 use Laravel\Ai\Ai;
 use Laravel\Ai\Concerns\RemembersConversations;
@@ -18,12 +19,17 @@ use Laravel\Ai\Events\AgentPrompted;
 use Laravel\Ai\Events\InvokingTool;
 use Laravel\Ai\Events\PromptingAgent;
 use Laravel\Ai\Events\ToolInvoked;
+use Laravel\Ai\Exceptions\StructuredOutputValidationException;
 use Laravel\Ai\Gateway\TextGenerationOptions;
+use Laravel\Ai\Messages\Message;
 use Laravel\Ai\Messages\UserMessage;
 use Laravel\Ai\Middleware\RememberConversation;
+use Laravel\Ai\ObjectSchema;
 use Laravel\Ai\Prompts\AgentPrompt;
 use Laravel\Ai\Responses\AgentResponse;
 use Laravel\Ai\Responses\StructuredAgentResponse;
+use Laravel\Ai\Responses\TextResponse;
+use Laravel\Ai\Schema\StructuredOutputValidator;
 use Laravel\Ai\Tools\AgentTool;
 use Laravel\Ai\Tools\McpServerTool;
 use Laravel\Ai\Tools\McpTool;
@@ -62,6 +68,23 @@ trait GeneratesText
 
                 $schema = $agent instanceof HasStructuredOutput ? $agent->schema(new JsonSchemaTypeFactory) : null;
 
+                if (! empty($schema)) {
+                    [$response, $errors] = $this->generateValidatedStructuredText($agent, $prompt, $messages, $schema);
+
+                    if ($errors !== [] && config('ai.structured_output.on_failure', 'throw') === 'throw') {
+                        throw StructuredOutputValidationException::withErrors(
+                            $errors,
+                            $response->structured,
+                            (int) config('ai.structured_output.max_retries', 2) + 1,
+                        );
+                    }
+
+                    return (new StructuredAgentResponse($invocationId, $response->structured, $response->text, $response->usage, $response->meta))
+                        ->withValidationErrors($errors)
+                        ->withToolCallsAndResults($response->toolCalls, $response->toolResults)
+                        ->withSteps($response->steps);
+                }
+
                 $response = $this->textGateway()->generateText(
                     $this,
                     $prompt->model,
@@ -73,14 +96,10 @@ trait GeneratesText
                     $prompt->timeout,
                 );
 
-                return ! empty($schema)
-                    ? (new StructuredAgentResponse($invocationId, $response->structured, $response->text, $response->usage, $response->meta))
-                        ->withToolCallsAndResults($response->toolCalls, $response->toolResults)
-                        ->withSteps($response->steps)
-                    : (new AgentResponse($invocationId, $response->text, $response->usage, $response->meta))
-                        ->withMessages($response->messages)
-                        ->withToolCallsAndResults($response->toolCalls, $response->toolResults)
-                        ->withSteps($response->steps);
+                return (new AgentResponse($invocationId, $response->text, $response->usage, $response->meta))
+                    ->withMessages($response->messages)
+                    ->withToolCallsAndResults($response->toolCalls, $response->toolResults)
+                    ->withSteps($response->steps);
             });
 
         $this->events->dispatch(
@@ -88,6 +107,67 @@ trait GeneratesText
         );
 
         return $response;
+    }
+
+    /**
+     * Generate a structured response, re-prompting until it satisfies the schema or retries run out.
+     *
+     * @param  array<string, Type>  $schema
+     * @param  array<int, Message>  $messages
+     * @return array{0: TextResponse, 1: list<string>}
+     */
+    protected function generateValidatedStructuredText(Agent $agent, AgentPrompt $prompt, array $messages, array $schema): array
+    {
+        $fullSchema = (new ObjectSchema($schema))->toSchema();
+        $tools = $this->resolveTools($agent);
+        $options = TextGenerationOptions::forAgent($agent);
+        $maxRetries = max(0, (int) config('ai.structured_output.max_retries', 2));
+
+        $errors = [];
+        $response = null;
+
+        for ($attempt = 0; $attempt <= $maxRetries; $attempt++) {
+            if ($attempt > 0) {
+                $messages[] = new UserMessage($this->structuredRetryPrompt($response->structured, $errors));
+            }
+
+            $response = $this->textGateway()->generateText(
+                $this,
+                $prompt->model,
+                (string) $agent->instructions(),
+                $messages,
+                $tools,
+                $schema,
+                $options,
+                $prompt->timeout,
+            );
+
+            $errors = StructuredOutputValidator::validate($fullSchema, $response->structured);
+
+            if ($errors === []) {
+                break;
+            }
+        }
+
+        return [$response, $errors];
+    }
+
+    /**
+     * Build the corrective prompt sent when the previous structured output violated the schema.
+     *
+     * @param  array<string, mixed>  $previous
+     * @param  list<string>  $errors
+     */
+    protected function structuredRetryPrompt(array $previous, array $errors): string
+    {
+        return implode("\n", [
+            'Your previous response did not satisfy the required output schema:',
+            ...array_map(fn ($error) => '- '.$error, $errors),
+            '',
+            'Previous response: '.json_encode($previous),
+            '',
+            'Return a corrected response that satisfies every constraint listed above.',
+        ]);
     }
 
     /**

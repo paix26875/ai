@@ -40,6 +40,26 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Structured Output
+    |--------------------------------------------------------------------------
+    |
+    | When an agent defines a structured output schema, the response is
+    | validated against that schema regardless of the provider. Constraints a
+    | provider cannot enforce natively (e.g. minimum / maximum) are checked
+    | here. When the output does not conform, the agent is re-prompted up to
+    | "max_retries" times. "on_failure" controls what happens once retries are
+    | exhausted: "throw" raises a StructuredOutputValidationException, while
+    | "return" returns the last response with the validation errors attached.
+    |
+    */
+
+    'structured_output' => [
+        'max_retries' => env('AI_STRUCTURED_OUTPUT_MAX_RETRIES', 2),
+        'on_failure' => env('AI_STRUCTURED_OUTPUT_ON_FAILURE', 'throw'),
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
     | AI Providers
     |--------------------------------------------------------------------------
     |
